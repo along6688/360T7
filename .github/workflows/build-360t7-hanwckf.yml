@@ -1,8 +1,10 @@
 name: Build 360T7 (hanwckf 闭源WiFi)
 
-# 触发方式：
-#   1) 在 GitHub 仓库 Actions 页面手动点 "Run workflow" (workflow_dispatch)
-#   2) 推送修改到 main 分支的以下文件时自动触发
+# ────────────────────────────────────────────────────────────────
+# 本工作流是【自包含】的：所有 diy 步骤都内联在下面的 run 中，
+# 不依赖仓库里的 scripts/ 目录，因此只需要上传这一个 yml 文件即可运行。
+# 触发：Actions 页面手动 Run workflow，或推送修改到本文件（main/master）。
+# ────────────────────────────────────────────────────────────────
 on:
   workflow_dispatch:
     inputs:
@@ -13,24 +15,20 @@ on:
   push:
     branches:
       - main
+      - master
     paths:
       - '.github/workflows/build-360t7-hanwckf.yml'
-      - 'scripts/diy-part1-hanwckf.sh'
-      - 'scripts/diy-part2-hanwckf.sh'
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - name: 检出本仓库（含 diy 脚本）
-        uses: actions/checkout@v4
-        with:
-          path: myrepo
-
       - name: 释放磁盘空间
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/lib/android /usr/local/.ghcup
-          sudo docker image prune --all --force
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL \
+                      /usr/local/lib/android /usr/local/.ghcup /usr/local/share/boost \
+                      /usr/share/swift 2>/dev/null || true
+          sudo docker image prune --all --force 2>/dev/null || true
           df -h /
 
       - name: 安装编译依赖
@@ -48,19 +46,90 @@ jobs:
         run: |
           git clone --depth=1 --branch openwrt-21.02 https://github.com/hanwckf/immortalwrt-mt798x.git immortalwrt
 
-      - name: 准备配置与 feeds (diy-part1)
+      - name: 准备配置与 feeds（diy-part1 内联）
         working-directory: immortalwrt
         run: |
+          set -e
+          echo "==> [diy-part1] 载入底包配置 + 注入第三方 feed / 单包"
+
+          # 1) 载入 360T7 底包（已含 360T7 profile 与闭源 mtwifi）
           cp defconfig/mt7981-ax3000.config .config
-          ../myrepo/scripts/diy-part1-hanwckf.sh
+
+          # 2) 注入 Passwall 官方 feed（main 分支）
+          cat >> feeds.conf.default <<'EOF'
+
+          # ===== 自定义 feed（360T7 闭源构建）=====
+          src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main
+          src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main
+          EOF
+
+          # 3) 单包克隆（避开 feed 分支与 21.02 不兼容）
+          git clone --depth=1 https://github.com/gngpp/luci-theme-design.git package/luci-theme-design
+          git clone --depth=1 https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
+
+          # 4) 更新并安装 feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 选定插件 (diy-part2) + defconfig
+      - name: 选定插件（diy-part2 内联）+ defconfig
         working-directory: immortalwrt
         run: |
-          ../myrepo/scripts/diy-part2-hanwckf.sh
+          set -e
+          echo "==> [diy-part2] 追加插件选择与默认主题"
+
+          cat >> .config <<'EOF'
+
+          # ===== 360T7 闭源 WiFi 构建 - 用户指定插件 =====
+          # 硬件加速（MTK 专用变体，兼容闭源 mtwifi 驱动）
+          CONFIG_PACKAGE_luci-app-turboacc-mtk=y
+          # 网速控制（MTK 专用变体）
+          CONFIG_PACKAGE_luci-app-eqos-mtk=y
+
+          # 科学上网 Passwall（来自 Openwrt-Passwall feed）
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_xray-core=y
+          CONFIG_PACKAGE_sing-box=y
+          CONFIG_PACKAGE_chinadns-ng=y
+
+          # 应用过滤 OpenAppFilter（包名 luci-app-oaf）
+          CONFIG_PACKAGE_luci-app-oaf=y
+          CONFIG_PACKAGE_oaf=y
+          CONFIG_PACKAGE_open-app-filter=y
+          CONFIG_PACKAGE_luci-i18n-oaf-zh-cn=y
+
+          # 域名解析 SmartDNS（默认 feeds 已含）
+          CONFIG_PACKAGE_smartdns=y
+          CONFIG_PACKAGE_luci-app-smartdns=y
+
+          # 主题 design
+          CONFIG_PACKAGE_luci-theme-design=y
+          CONFIG_PACKAGE_luci-app-design-config=y
+
+          # IPv6 支撑
+          CONFIG_PACKAGE_luci-proto-ipv6=y
+          CONFIG_PACKAGE_odhcp6c=y
+          CONFIG_PACKAGE_odhcpd-ipv6only=y
+          CONFIG_PACKAGE_kmod-ipt-nat6=y
+
+          # 中文界面
+          CONFIG_LUCI_LANG_zh_Hans=y
+          EOF
+
+          # 首次启动默认使用 design 主题
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/zzz-default-theme <<'UCI'
+          #!/bin/sh
+          if [ -d /www/luci-static/design ]; then
+              uci set luci.main.mediaurlbase='/luci-static/design'
+              uci commit luci
+          fi
+          exit 0
+          UCI
+          chmod +x files/etc/uci-defaults/zzz-default-theme
+
+          # 解析配置（未满足的依赖会在此报错）
           make defconfig
+
           echo "===== 已选关键包（校验用）====="
           grep -E 'luci-app-turboacc-mtk|luci-app-eqos-mtk|luci-app-passwall|luci-app-oaf|smartdns|luci-theme-design|kmod-mt_wifi|mtwifi' .config || true
 
@@ -72,16 +141,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/.ccache
-          key: mt7981-360t7-ccache-${{ github.run_id }}
-          restore-keys: mt7981-360t7-ccache-
+          key: ccache-mt7981-360t7-${{ github.run_id }}
+          restore-keys: |
+            ccache-mt7981-360t7-
 
       - name: 编译固件
         working-directory: immortalwrt
         env:
-          USE_CCACHE: 1
           CCACHE_DIR: /home/runner/.ccache
         run: |
-          export CCACHE_DIR=/home/runner/.ccache
+          # pipefail：确保 tee 不会吞掉 make 的失败退出码
+          set -o pipefail
           make -j$(nproc) 2>&1 | tee build.log
 
       - name: 收集 360T7 固件
@@ -89,9 +159,11 @@ jobs:
         working-directory: immortalwrt
         run: |
           mkdir -p /tmp/artifact
-          find bin/targets/mediatek/mt7981 -type f \( -iname '*360*' -o -iname '*qihoo*' \) -exec cp -t /tmp/artifact {} +
+          find bin/targets/mediatek/mt7981 -type f \
+            \( -iname '*360*' -o -iname '*qihoo*' \) -exec cp -t /tmp/artifact {} + || true
+          cp build.log /tmp/artifact/ 2>/dev/null || true
           echo "===== 产物 ====="
-          ls -lh /tmp/artifact || echo "未找到 360T7 镜像，请检查上面的 find 结果"
+          ls -lh /tmp/artifact
 
       - name: 上传固件 Artifact
         if: success()
@@ -106,3 +178,4 @@ jobs:
         with:
           name: build-log-360t7
           path: immortalwrt/build.log
+          if-no-files-found: ignore
