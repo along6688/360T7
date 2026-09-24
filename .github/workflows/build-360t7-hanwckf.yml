@@ -1,0 +1,108 @@
+name: Build 360T7 (hanwckf 闭源WiFi)
+
+# 触发方式：
+#   1) 在 GitHub 仓库 Actions 页面手动点 "Run workflow" (workflow_dispatch)
+#   2) 推送修改到 main 分支的以下文件时自动触发
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '发布用的 tag 名称（仅记录用）'
+        required: false
+        default: '360t7-hanwckf'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-360t7-hanwckf.yml'
+      - 'scripts/diy-part1-hanwckf.sh'
+      - 'scripts/diy-part2-hanwckf.sh'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出本仓库（含 diy 脚本）
+        uses: actions/checkout@v4
+        with:
+          path: myrepo
+
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/lib/android /usr/local/.ghcup
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+            g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev \
+            libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libreadline-dev libssl-dev libtool \
+            lrzsz msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-pyelftools \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget \
+            xmlto xxd zlib1g-dev
+
+      - name: 克隆 hanwckf/immortalwrt-mt798x (openwrt-21.02)
+        run: |
+          git clone --depth=1 --branch openwrt-21.02 https://github.com/hanwckf/immortalwrt-mt798x.git immortalwrt
+
+      - name: 准备配置与 feeds (diy-part1)
+        working-directory: immortalwrt
+        run: |
+          cp defconfig/mt7981-ax3000.config .config
+          ../myrepo/scripts/diy-part1-hanwckf.sh
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 选定插件 (diy-part2) + defconfig
+        working-directory: immortalwrt
+        run: |
+          ../myrepo/scripts/diy-part2-hanwckf.sh
+          make defconfig
+          echo "===== 已选关键包（校验用）====="
+          grep -E 'luci-app-turboacc-mtk|luci-app-eqos-mtk|luci-app-passwall|luci-app-oaf|smartdns|luci-theme-design|kmod-mt_wifi|mtwifi' .config || true
+
+      - name: 下载源码包
+        working-directory: immortalwrt
+        run: make download -j8 || true
+
+      - name: 缓存 ccache（加速重跑）
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.ccache
+          key: mt7981-360t7-ccache-${{ github.run_id }}
+          restore-keys: mt7981-360t7-ccache-
+
+      - name: 编译固件
+        working-directory: immortalwrt
+        env:
+          USE_CCACHE: 1
+          CCACHE_DIR: /home/runner/.ccache
+        run: |
+          export CCACHE_DIR=/home/runner/.ccache
+          make -j$(nproc) 2>&1 | tee build.log
+
+      - name: 收集 360T7 固件
+        if: success()
+        working-directory: immortalwrt
+        run: |
+          mkdir -p /tmp/artifact
+          find bin/targets/mediatek/mt7981 -type f \( -iname '*360*' -o -iname '*qihoo*' \) -exec cp -t /tmp/artifact {} +
+          echo "===== 产物 ====="
+          ls -lh /tmp/artifact || echo "未找到 360T7 镜像，请检查上面的 find 结果"
+
+      - name: 上传固件 Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-360t7-closedsource
+          path: /tmp/artifact
+
+      - name: 上传编译日志（失败时排查）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-360t7
+          path: immortalwrt/build.log
