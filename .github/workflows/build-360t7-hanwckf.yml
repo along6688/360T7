@@ -42,9 +42,11 @@ jobs:
             qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget \
             xmlto xxd zlib1g-dev
 
-      - name: 克隆 hanwckf/immortalwrt-mt798x (openwrt-21.02)
+      - name: 克隆 lgs2007m/immortalwrt-mt798x (v7672, 7.6.7.2 闭源驱动)
         run: |
-          git clone --depth=1 --branch openwrt-21.02 https://github.com/hanwckf/immortalwrt-mt798x.git immortalwrt
+          # lgs2007m 的 v7672 分支原生锁定 7.6.7.2-fw-20240823 闭源 WiFi 驱动（社区推荐），含 360T7
+          # 该仓库是 hanwckf 的同源 fork，等价可用；hanwckf 自身 openwrt-21.02 当前已是 7673（观望中）
+          git clone --depth=1 --branch v7672 https://github.com/lgs2007m/immortalwrt-mt798x.git immortalwrt
 
       - name: 准备配置与 feeds（diy-part1 内联）
         working-directory: immortalwrt
@@ -101,7 +103,7 @@ jobs:
           CONFIG_PACKAGE_smartdns=y
           CONFIG_PACKAGE_luci-app-smartdns=y
 
-          # 主题 design
+          # 主题：默认 argon（Padavan 风格外观）；同时保留 design 供手动切换
           CONFIG_PACKAGE_luci-theme-design=y
           CONFIG_PACKAGE_luci-app-design-config=y
 
@@ -115,12 +117,12 @@ jobs:
           CONFIG_LUCI_LANG_zh_Hans=y
           EOF
 
-          # 首次启动默认使用 design 主题
+          # 首次启动默认使用 argon 主题（Padavan 风格外观）
           mkdir -p files/etc/uci-defaults
           cat > files/etc/uci-defaults/zzz-default-theme <<'UCI'
           #!/bin/sh
-          if [ -d /www/luci-static/design ]; then
-              uci set luci.main.mediaurlbase='/luci-static/design'
+          if [ -d /www/luci-static/argon ]; then
+              uci set luci.main.mediaurlbase='/luci-static/argon'
               uci commit luci
           fi
           exit 0
